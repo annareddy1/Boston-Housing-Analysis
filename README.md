@@ -4,9 +4,9 @@ The Boston dataset contains the housing values of 506 suburbs in the Boston area
 ### Team members
 
 Rithika Annareddy,
-Cameron Erdman,
 Colin Walsh,
 Maggie Miller,
+Cameron Erdman,
 Zak Taylor
 
 ### Variables
