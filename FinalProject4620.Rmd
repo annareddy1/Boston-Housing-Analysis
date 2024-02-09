@@ -1,0 +1,646 @@
+---
+title: "Stat 4620 Project"
+author: "Cameron Erdman, Colin Walsh, Maggie Miller, Rithika Annareddy, Zak Taylor"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, include=FALSE}
+library(tidyverse)
+library(leaps)
+library(glmnet)
+library(tree)
+library(randomForest)
+library(gbm)
+library(pls)
+library(ggcorrplot)
+library(splines)
+library(MASS)
+```
+
+# Report
+
+The Boston dataset contains the housing values of 506 suburbs in the Boston area. The dataset contains 13 predictors and 1 mystery response variable that we will try to predict statistical analysis. The 13 predictors in this dataset are as follows:    
+-crim: per capita crime rate by town.   
+-zn: Proportion of residential land zoned for lots over 25,000 sq.ft.   
+-indus: Proportion of non-retail business acres per town.   
+-chas: Charles River dummy variable (= 1 if tract bounds river; 0 otherwise).   
+-nox: Nitrogen oxides concentration (parts per 10 million).    
+-rm: Average number of rooms per dwelling.   
+-age: Proportion of owner-occupied units built prior to 1940.  
+-dis: Weighted mean of distances to five Boston employment centers.   
+-rad: Index of accessibility to radial highways.   
+-tax: Full-value property-tax rate per $10,000.   
+-ptratio: Pupil-teacher ratio by town.   
+-lstat: Lower status of the population (percent).   
+-medv: Median value of owner-occupied homes in $1000s.      
+
+```{r, echo=F}
+load("./Boston_Stat4620_2023.RData") #Loads as Boston.Stat4620
+df <- Boston.Stat4620 #Copy data to df for manipulation
+head(df) #taking a peak at the data to check load was successful
+```
+
+Before we can do any model building, we must first clean up our dataset and explore the variables we will be using for said model building. In our exploration of data, we found 10 missing values within our dataset. All 10 of the missing values were found to be from our mystery response variables, so we compared the observations where the response was missing to those that contained values for the response to see if there was a rhyme or reason to omit these responses. To do this we compared the means and standard deviations of the predictor variables of responses that were missing to those that had a response recorded. As you can see from the analysis below, we concluded that response variables were likely omitted randomly, as we saw no significant difference between the means of observations with missing responses compared to those with a response variable. Since it seems to be random whether or not the response was not recorded, we decided to omit observations without a response, bringing our dataset to 496 total observations.   
+
+```{r, echo=F}
+df_na <- df[rowSums(is.na(df)) > 0,]
+print("Means:")
+sapply(df[,-c(4, 15)], function(x) mean(x))
+sapply(df_na[,-c(4, 15)], function(x) mean(x))
+#print("Standard Deviations:")
+#sapply(df[,-c(4, 15)], function(x) sd(x))
+#sapply(df_na[,-c(4, 15)], function(x) sd(x))
+```
+
+Now that we have cleaned up our dataset, we can look into the predictors and explore their relationship with the response. First, we plotted each predictor against the response variable to see if there were any concerning relationships between a certain predictor and the response, as can be seen in the graph below.   
+
+```{r, include=FALSE, fig.height=10, fig.width=5}
+library(ggplot2)
+library(corrplot)
+library(reshape2)
+```
+```{r, echo=F, fig.height=4, fig.width=4}
+df_no_na <- na.omit(df)
+# plot each feature against Resp
+ggplot(melt(df_no_na, id="Resp"), aes(x=value, y=Resp))+
+  facet_wrap(~variable, scales="free")+
+  geom_point()
+```
+
+We see that there are a few potential similarities between zn and ptratio and the response. However, after further investigation (can be found in appendix) we found that this concern is not necessary and we can continue on with our exploration of the variables.   
+
+```{r, echo=F, fig.height=3, fig.width=3}
+#Investigating potential similarities between zn and ptratio's relationship to Resp. Found to be non significant
+ggplot(df_no_na, aes(x = zn, y = Resp)) +
+  geom_point()
+
+ggplot(df_no_na, aes(x = ptratio, y = Resp)) +
+  geom_point()
+```
+   
+To further explore our data, we looked into the correlation of each variable through a correlation matrix, as can be seen in the table below.    
+
+```{r, echo=FALSE, fig.height=3, fig.width=3}
+df_no_na <- na.omit(df)
+corrplot(cor(df_no_na[,-c(4)]))
+```
+   
+Through this we can come to a few key conclusions about our data. We found that there are no variables with zero corollary effect with the response. Of all the predictors, the variable medv has the strongest correlation with a -0.6 implying that as the median value of the house decreases, the response variable increases. We also have to take note of the potential interaction effect between the variables dis, nox, indus, tax, rad, and age, as they are all decently correlated with each other. Keeping these takeaways in mind, we moved into our model building to try to predict the response.   
+   
+First things first, we must randomly split our data into a training set and a testing set. We do this so we can build models on the training set and test their effectiveness on the testing set. We decided to start our model building with the most intuitive model, the linear model. However, with 13 predictors, our model could suffer from the overfitting and an increased variance from too many features. In order to dampen the effect of overfitting we selected a model using best subset selection. We took every possible model with k=0,..,13 predictors, taking the model with the lowest RSS from each model with k predictors. After we found the best model with k predictors, we compared the Cp of each model (since Cp is an unbiased estimate of test MSE) and took the model with the lowest Cp, which can be seen below. 
+```{r echo=FALSE, fig.height=3, fig.width=3}
+set.seed(123)
+Boston.Stat4620<- na.omit(Boston.Stat4620)
+ix <- sample(1:nrow(Boston.Stat4620),nrow(Boston.Stat4620)/2)
+train <- Boston.Stat4620[ix, ]
+test<- Boston.Stat4620[-ix, ]
+test_mses <- c()
+x.test <- model.matrix(Resp ~., test)[,-1]
+y.test<- test$Resp
+regfit<- regsubsets(Resp~ . , train, nvmax = 14)
+reg.summary <- summary(regfit)
+test.mat <- model.matrix(Resp~ ., data = test)
+val.err <- rep(NA, 14)
+for(i in 1:14){
+  coefi <- coef(regfit, id =i)
+  pred <- test.mat[, names(coefi)] %*% coefi
+    val.err[i]<- mean((test$Resp- pred )^2)
+}
+best.reg<- lm(Resp~zn+chas+nox+tax+ptratio+medv, data = train)
+bestreg.sum <- summary(best.reg)
+reg.pred <- predict(best.reg, test)
+#MSE Least Squares
+best.reg.mse <- mean((reg.pred-y.test)^2)
+test_mses <- c(test_mses, best.reg.mse )
+#plot(regfit, scale = "Cp", main = "Different model's Cp")
+names(best.reg.mse)= "Least Squares Model Test MSE"
+print( best.reg.mse)
+print("Model Variables Chosen and their coefficients: ")
+(best.reg$coefficients)
+```
+
+     
+Although the least squares model seems to perform well, we should still explore other possible models. We first started by looking at shrinkage through Ridge Regression and LASSO. These methods are very useful when trying to avoid overfitting, which is a concern when you have a large amount of predictors. Both are able to control the bias-variance tradeoff through a shrinkage parameter lambda, with Ridge Regression doing a better job at capturing a lot of variables providing small effects while LASSO is better at dimension reduction and variable selection. However, after creating both models with our training set and testing them against the testing set, we find that they have comparable, yet slightly worse test MSEs compared to our least squares model. Due to simplicity and interpretability of the least squares model, we chose to keep that model over the Ridge Regression and LASSO models.     
+```{r echo=FALSE}
+set.seed(123)
+x <- model.matrix(Resp ~ . ,Boston.Stat4620) [, -1]
+y <- Boston.Stat4620$Resp
+grid <- 10^seq(10,-2, length=100)
+ridge.mod <- glmnet(x[ix, ],y[ix], alpha = 0, lambda = grid)
+#finding which is best lambda value
+cv.ridgeglm <- cv.glmnet(x[ix, ], y[ix], alpha=0)
+best.lam<- cv.ridgeglm$lambda.min
+ridge.pred <- predict(ridge.mod, s =0.1363408, newx = x.test)
+#MSE Ridge
+ridge.mse <- mean((ridge.pred - y[-ix])^2)
+test_mses <- c(test_mses, ridge.mse )
+x.train <- model.matrix(Resp~ ., train)[,-1]
+y.train <- train$Resp
+lasso.cv <- cv.glmnet(x.train, y.train, alpha=1)
+lambda.cv <- lasso.cv$lambda.min
+lasso.mod <- glmnet(x.train, y.train, alpha = 1, lambda = lambda.cv)
+lasso.pred <- predict(lasso.mod, newx=x.test)
+#MSE LASSO
+lasso.mse <- mean((lasso.pred-y.test)^2)
+test_mses <- c(test_mses, lasso.mse )
+names(ridge.mse) = "Ridge Model Test MSE"
+names(lasso.mse) = "Lasso Model Test MSE"
+combined<- c(ridge.mse, lasso.mse)
+combined
+```
+
+Next we decided to look into more dimension reduction methods, PCR and PLS. PCR is unsupervised, so it does not have any information on the relationship of the response variable with the predictors. Since it is unsupervised, it can help uncover relationships within the data we did not know about. However, the PCR model performs poorly in our tests, so we decided to look into a supervised version of PCR, PLS. Although this model performed better, as seen by the lower test MSE, it still is not as good as our least squares model, so we continue to search for a better model. 
+    
+```{r echo=FALSE}
+Boston <- Boston.Stat4620
+Boston <- subset(Boston, select=-12)
+Boston <- na.omit(Boston)
+set.seed(1738)
+ix <- sample(1:nrow(Boston), nrow(Boston)/2)
+Boston_train <- Boston[ix,]
+Boston_test <- Boston[-ix,]
+library(pls)
+Boston.pcr <- pcr(Resp~., data=Boston_train, scale=T, validation="CV")
+pcr.pred <- predict(Boston.pcr, Boston_test, ncomp=4)
+pcr.mse <- mean((pcr.pred-Boston_test$Resp)^2)
+test_mses <- c(test_mses, mean((pcr.pred-Boston_test$Resp)^2))
+Boston.pls <- plsr(Resp~., data=Boston_train, scale=T, validation="CV")
+pls.pred <- predict(Boston.pls, Boston_test, ncomp=5)
+pls.mse<- mean((pls.pred-Boston_test$Resp)^2)
+test_mses <- c(test_mses, mean((pls.pred-Boston_test$Resp)^2))
+names(pcr.mse) = "PCR Model Test MSE"
+names(pls.mse) = "PLS Model Test MSE"
+combined<- c(pcr.mse, pls.mse)
+combined
+```   
+   
+We decided that regression trees could be a good place to look next. It could be helpful for us because it handles interactions well, which we pointed out as a potential issue when we explored our data. However, a regular tree is often poor at predicting due to it being prone to a larger variance. This can be remedied through algorithms such as bagging, random forest, and boosting. However, these methods really hurt the interpretability of our model. Bagging involves building many trees and averaging them out, and our model tested very well, with a test MSE lower than that of our least squares model. The same held true for our random forest model, which tries to de-correlate the trees gathered from bagging, although worse than the bagging model. Boosting performed worse than both other tree methods and will be disregarded. An interesting thing to note is the variable medv was the most important for all 3 regression tree models, which led us to look into the relationship between and response variable and medv by itself.     
+```{r echo=FALSE}
+set.seed(1738)
+Boston.bag <- randomForest(Resp~., data=Boston_train, mtry=13, importance=T, ntree=100)
+bag.pred <- predict(Boston.bag, newdata=Boston_test)
+test_mses <- c(test_mses, mean((bag.pred-Boston_test$Resp)^2))
+bag.mse <- mean(bag.pred-Boston_test$Resp)^2
+names(bag.mse) <- "Bagging Model MSE"
+bag.importance <- importance(Boston.bag)
+Boston.rf <- randomForest(Resp~., data=Boston_train, importance=T, ntree=100)
+rf.pred <- predict(Boston.rf, newdata=Boston_test)
+test_mses <- c(test_mses, mean((rf.pred-Boston_test$Resp)^2))
+rf.mse <- mean(rf.pred-Boston_test$Resp)^2
+names(rf.mse) <- "Random Forest Model MSE"
+rf.importance <- importance(Boston.rf)
+Boston.boost <- gbm(Resp~., data=Boston_train, distribution="gaussian", n.trees=500, interaction.depth=2)
+boost.pred <- predict(Boston.boost, newdata=Boston_test)
+test_mses <- c(test_mses, mean((boost.pred-Boston_test$Resp)^2))
+boost.mse <- mean((boost.pred-Boston_test$Resp)^2)
+names(boost.mse) <- "Boosting Model MSE"
+combined <- c(boost.mse, rf.mse, bag.mse)
+combined
+```
+
+```{r echo=FALSE}
+print("Bagging Importance")
+bag.importance
+#print("Random Forrest Importance")
+#rf.importance
+```
+
+To test the relationship between the response and medv, we decided to take some splines. However, all of our models seem to perform poorly in tests, so we will disregard these models.    
+```{r echo=FALSE}
+Boston.cubic <- lm(Resp~bs(medv, df=4), data=Boston_train)
+cubic.pred <- predict(Boston.cubic, newdata=data.frame(Boston_test))
+mean((cubic.pred-Boston_test$Resp)^2)
+cs.mse <- mean((cubic.pred-Boston_test$Resp)^2)
+names(cs.mse) = "Cubic Splines MSE"
+Boston.natural <- lm(Resp~ns(medv, df=4), data=Boston_train)
+natural.pred <- predict(Boston.natural, newdata=data.frame(Boston_test))
+mean((natural.pred-Boston_test$Resp)^2)
+nat.mse <- mean((natural.pred-Boston_test$Resp)^2)
+names(nat.mse) = "Natural Splines MSE"
+Boston.smoothcv <- smooth.spline(Boston_train$medv, Boston_train$Resp, cv=T)
+smooth.pred <- predict(Boston.smoothcv, Boston_test$medv)
+mean((smooth.pred$y-Boston_test$Resp)^2)
+smooth.mse <- mean((smooth.pred$y-Boston_test$Resp)^2)
+names(smooth.mse) = "Smoothing Splines MSE"
+comb <- c(smooth.mse, cs.mse, nat.mse)
+comb
+```
+Now that we built some models and compared them, we must decide which model we think is best. Our decision came down to two models, the least squares model and the bagging model. The bagging model has the advantage of performing slightly better in our testing of predictive power. However, the least squares model is much easier to interpret. In the end, we decided that the interpretability of the least squares model outweighed the slightly better predictive prowess of the bagging model. On top of the concern of interpretability for bagging, we also run into the concern of correlated trees, which is addressed in random forest, however, random forest performed worse predictively and still runs into the issue of being hard to interpret. Due to these concerns, we have decided to select the least squares model as our model of choice. We can see the summary of our final model in the graph below.
+```{r echo=FALSE}
+summary(best.reg)
+```
+    
+Now that we have selected the least squares model, let’s take a look at our assumptions of a linear model and see if our data violates these assumptions. For the least squares model it was assumed that the model is linear in parameters, and when graphed the data does not look perfectly linear. However the other assumptions are that residual values are normally distributed and the variance of the residuals is approximately constant which can be seen in the normal qq plot and scale-location plot respectively. Then the multicollinearity assumption is also met which can be shown in the correlation plots, where none of the correlations are higher than .8 (chas has to be excluded in the charts since it is a factor variable). 
+    
+```{r echo=FALSE}
+# Least Squares Assumptions
+par(mfrow = c(2, 2))
+plot(best.reg)
+
+reg.subset <- subset(Boston.Stat4620, select = c(zn, nox, tax, ptratio, medv))
+cor.mat <- cor(reg.subset)
+ggcorrplot(cor.mat, hc.order = TRUE, type = "lower", lab = TRUE)
+
+```
+      
+So in conclusion, we have learned that our data has quite a few significant predictors for our response, however, not every predictor was useful. We learned that our response variable has a few factors it depends on heavily and a few that really do not have a big impact. Along the way we learned that our response is at least somewhat linear, as we can see from our graphs, models that tend to be less flexible tend to perform better. In our exploration and model building, digging into each model brought us to another potential model that could potentially perform better. Although in the end we decided our original model was our best one, we feel as if there was strong reasoning behind exploring other models.
+
+```{r, echo=FALSE, include=FALSE}
+library(tidyverse)
+library(leaps)
+library(glmnet)
+library(tree)
+library(randomForest)
+library(gbm)
+library(pls)
+library(ggcorrplot)
+library(splines)
+library(MASS)
+```
+
+#  Appendix    
+## Section 2.1  
+   
+### Loading in the data      
+```{r}
+load("./Boston_Stat4620_2023.RData") #Loads as Boston.Stat4620
+df <- Boston.Stat4620 #Copy data to df for manipulation
+head(df) #taking a peak at the data to check load was successful
+```
+
+### Checking the metadata  
+```{r}
+##ran this to get below information
+#library(MASS)
+#?Boston 
+```
+
+From the Boston metadata:
+This data frame contains the following columns:
+
+crim: per capita crime rate by town.
+
+zn: proportion of residential land zoned for lots over 25,000 sq.ft.
+
+indus: proportion of non-retail business acres per town.
+
+chas: Charles River dummy variable (= 1 if tract bounds river; 0 otherwise).
+
+nox: nitrogen oxides concentration (parts per 10 million).
+
+rm: average number of rooms per dwelling.
+
+age: proportion of owner-occupied units built prior to 1940.
+
+dis: weighted mean of distances to five Boston employment centres.
+
+rad: index of accessibility to radial highways.
+
+tax: full-value property-tax rate per $10,000.
+
+ptratio: pupil-teacher ratio by town.
+
+black: $1000(Bk - 0.63)^2$ where $Bk$ is the proportion of black individuals by town.
+
+lstat: lower status of the population (percent).
+
+medv: median value of owner-occupied homes in $1000s.
+
+Resp: specific to this data set, the response variable.
+
+
+### Describing the variables   
+```{r}
+summary(df)
+```
+
+
+```{r}
+sapply(df, class)
+```
+
+All data is of type numeric with exception of the Charles river dummy variable being a factor and the rad index being an integer.
+
+
+### Checking fill levels   
+
+```{r}
+sum(is.na(df))
+```
+
+We see there are 10 NA's in our data frame.
+
+
+```{r}
+sapply(df, function(x) sum(is.na(x)))
+```
+
+They are all in the Resp variable.
+
+```{r}
+df_na <- df[rowSums(is.na(df)) > 0,]
+df_na
+```
+
+These are the 10 rows containing NA values in the Resp variable.
+
+```{r}
+summary(df)
+summary(df_na)
+```
+
+Too much information, I'm going to look specifically at the means and standard deviations.
+
+```{r}
+print("Means:")
+sapply(df[,-c(4, 15)], function(x) mean(x))
+sapply(df_na[,-c(4, 15)], function(x) mean(x))
+```
+```{r}
+print("Standard Deviations:")
+sapply(df[,-c(4, 15)], function(x) sd(x))
+sapply(df_na[,-c(4, 15)], function(x) sd(x))
+```
+
+From a quick check at the means and standard deviations, it seems as though the NA data in Resp is random.
+
+```{r}
+df_no_na <- na.omit(df)
+sapply(df_no_na, function(x) sum(is.na(x)))
+```
+
+So we remove the NA values and double check our fixed data frame has no missing values.
+
+
+### Exploratory Analysis   
+```{r, include=FALSE}
+library(ggplot2)
+library(corrplot)
+library(reshape2)
+```
+
+```{r}
+# plot each feature against Resp
+ggplot(melt(df_no_na, id="Resp"), aes(x=value, y=Resp))+
+  facet_wrap(~variable, scales="free")+
+  geom_point()
+```
+
+```{r}
+#Investigating potential similarities between zn and ptratio's relationship to Resp. Found to be non significant
+ggplot(df_no_na, aes(x = zn, y = Resp)) +
+  geom_point()
+
+ggplot(df_no_na, aes(x = ptratio, y = Resp)) +
+  geom_point()
+```
+
+
+### Correlation Analysis   
+```{r}
+corrplot(cor(df_no_na[,-c(4)]))
+```
+
+```{r}
+(corrmatrix <- cor(df_no_na[,-c(4)], use = "complete.obs")[14,])
+corrmatrix[corrmatrix > 0.5 | corrmatrix < -0.5] 
+```
+
+The variable 'medv' has the strongest correlation with a $-0.6$ implying that as the median value of the house decreases, the response variable increases.
+
+
+### Takeaways    
+
+Some takeaways so far:
+
+- There were some NA values in our response variable, likely placed to be intentionally found by us. They seem to be randomly placed.
+- There are no immediately obvious strong corollary effects between any variables and the response with the slight exception of medv.
+- Additionally, there are no variables with no corollary effect with the response. 
+- The affect of the predictors on the response will be seen when we experiment with our models.
+- dis, nox, indus, tax, rad, and age all present potential inter correlation concerns.
+
+
+## Section 2.2    
+
+
+### Linear Models
+### Creating test and train data sets  
+```{r}
+set.seed(123)
+Boston.Stat4620<- na.omit(Boston.Stat4620)
+ix <- sample(1:nrow(Boston.Stat4620),nrow(Boston.Stat4620)/2)
+train <- Boston.Stat4620[ix, ]
+test<- Boston.Stat4620[-ix, ]
+test_mses <- c()
+```
+
+### Using best subset selection to fit data using least squares   
+```{r}
+set.seed(123)
+x.test <- model.matrix(Resp ~., test)[,-1]
+y.test<- test$Resp
+regfit<- regsubsets(Resp~ . , train, nvmax = 14)
+reg.summary <- summary(regfit)
+reg.summary
+plot(regfit, scale = "adjr2")
+plot(regfit, scale = "Cp")
+
+test.mat <- model.matrix(Resp~ ., data = test)
+val.err <- rep(NA, 14)
+for(i in 1:14){
+  coefi <- coef(regfit, id =i)
+  pred <- test.mat[, names(coefi)] %*% coefi
+    val.err[i]<- mean((test$Resp- pred )^2)
+}
+val.err
+which.min(val.err)
+coef(regfit,6)
+
+best.reg<- lm(Resp~zn+chas+nox+tax+ptratio+medv, data = train)
+bestreg.sum <- summary(best.reg)
+reg.pred <- predict(best.reg, test)
+#MSE Least Squares
+best.reg.mse <- mean((reg.pred-y.test)^2)
+test_mses <- c(test_mses, best.reg.mse )
+```
+The plot shows that the model containing the 6 variables Zn, Chas, Nox, Tax, Ptratio, and medv results in the lowest Cp and the coefficients for this model are as follows:
+```{r}
+coef(best.reg, 7)
+```
+
+### Ridge Regression   
+
+```{r}
+set.seed(123)
+x <- model.matrix(Resp ~ . ,Boston.Stat4620) [, -1]
+y <- Boston.Stat4620$Resp
+grid <- 10^seq(10,-2, length=100)
+ridge.mod <- glmnet(x[ix, ],y[ix], alpha = 0, lambda = grid)
+#finding which is best lambda value
+cv.ridgeglm <- cv.glmnet(x[ix, ], y[ix], alpha=0)
+best.lam<- cv.ridgeglm$lambda.min
+ridge.pred <- predict(ridge.mod, s =0.1363408, newx = x.test)
+#MSE Ridge
+ridge.mse <- mean((ridge.pred - y[-ix])^2)
+test_mses <- c(test_mses, ridge.mse )
+```
+
+### Lasso Regression    
+```{r}
+x.train <- model.matrix(Resp~ ., train)[,-1]
+y.train <- train$Resp
+lasso.cv <- cv.glmnet(x.train, y.train, alpha=1)
+lambda.cv <- lasso.cv$lambda.min
+lasso.mod <- glmnet(x.train, y.train, alpha = 1, lambda = lambda.cv)
+lasso.pred <- predict(lasso.mod, newx=x.test)
+#MSE LASSO
+lasso.mse <- mean((lasso.pred-y.test)^2)
+test_mses <- c(test_mses, lasso.mse )
+```
+
+
+
+
+```{r}
+Boston <- Boston.Stat4620
+Boston <- subset(Boston, select=-12)
+Boston <- na.omit(Boston)
+set.seed(1738)
+ix <- sample(1:nrow(Boston), nrow(Boston)/2)
+Boston_train <- Boston[ix,]
+Boston_test <- Boston[-ix,]
+
+```
+
+
+### PCR for Resp
+
+```{r}
+library(pls)
+set.seed(1738)
+Boston.pcr <- pcr(Resp~., data=Boston_train, scale=T, validation="CV")
+summary(Boston.pcr)
+validationplot(Boston.pcr, val.type="MSEP")
+pcr.pred <- predict(Boston.pcr, Boston_test, ncomp=4)
+pcr.mse <- mean((pcr.pred-Boston_test$Resp)^2)
+test_mses <- c(test_mses, mean((pcr.pred-Boston_test$Resp)^2))
+```
+
+### PLS for Resp
+
+```{r}
+set.seed(1738)
+Boston.pls <- plsr(Resp~., data=Boston_train, scale=T, validation="CV")
+summary(Boston.pls)
+validationplot(Boston.pls, val.type="MSEP")
+pls.pred <- predict(Boston.pls, Boston_test, ncomp=5)
+pls.mse<- mean((pls.pred-Boston_test$Resp)^2)
+test_mses <- c(test_mses, mean((pls.pred-Boston_test$Resp)^2))
+```
+
+### Non Linear Models   
+### Bagging for Resp
+
+```{r}
+
+set.seed(1738)
+Boston.bag <- randomForest(Resp~., data=Boston_train, mtry=13, importance=T, ntree=100)
+bag.pred <- predict(Boston.bag, newdata=Boston_test)
+test_mses <- c(test_mses, mean((bag.pred-Boston_test$Resp)^2))
+bag.mse <- mean(bag.pred-Boston_test$Resp)^2
+names(bag.mse) <- "Bagging Model MSE"
+bag.importance <- importance(Boston.bag)
+```
+
+### Random Forest for Resp
+
+```{r}
+set.seed(1738)
+Boston.rf <- randomForest(Resp~., data=Boston_train, importance=T, ntree=100)
+rf.pred <- predict(Boston.rf, newdata=Boston_test)
+test_mses <- c(test_mses, mean((rf.pred-Boston_test$Resp)^2))
+rf.mse <- mean(rf.pred-Boston_test$Resp)^2
+names(rf.mse) <- "Random Forest Model MSE"
+rf.importance <- importance(Boston.rf)
+```
+
+### Boosting for Resp
+
+```{r}
+
+set.seed(1738)
+Boston.boost <- gbm(Resp~., data=Boston_train, distribution="gaussian", n.trees=500, interaction.depth=2)
+summary(Boston.boost)
+boost.pred <- predict(Boston.boost, newdata=Boston_test)
+test_mses <- c(test_mses, mean((boost.pred-Boston_test$Resp)^2))
+
+boost.mse <- mean((boost.pred-Boston_test$Resp)^2)
+names(boost.mse) <- "Boosting Model MSE"
+
+```
+
+```{r}
+names(test_mses) <- c("Least Squares","Ridge","Lasso", "PCR", "PLS", "Bagging", "Random Forest", "Boosting")
+test_mses
+```
+
+Early Observations:
+
+As we can see, from our models so far Bagging gives the lowest test MSE. However, we can also see that the variable medv has high importance in all of our CART methods. I will see if just using this variable in splines could be a better predictor of the mystery response.
+
+### Cubic Splines With medv
+
+```{r}
+Boston.cubic <- lm(Resp~bs(medv, df=4), data=Boston_train)
+cubic.pred <- predict(Boston.cubic, newdata=data.frame(Boston_test))
+mean((cubic.pred-Boston_test$Resp)^2)
+summary(Boston.cubic)
+
+cs.mse <- mean((cubic.pred-Boston_test$Resp)^2)
+names(cs.mse) = "Cubic Splines MSE"
+```
+
+### Natural Splines With medv
+
+```{r}
+
+Boston.natural <- lm(Resp~ns(medv, df=4), data=Boston_train)
+natural.pred <- predict(Boston.natural, newdata=data.frame(Boston_test))
+mean((natural.pred-Boston_test$Resp)^2)
+summary(Boston.natural)
+nat.mse <- mean((natural.pred-Boston_test$Resp)^2)
+names(nat.mse) = "Natural Splines MSE"
+```
+
+### Smoothing Spline With medv
+
+```{r}
+set.seed(1738)
+Boston.smoothcv <- smooth.spline(Boston_train$medv, Boston_train$Resp, cv=T)
+smooth.pred <- predict(Boston.smoothcv, Boston_test$medv)
+mean((smooth.pred$y-Boston_test$Resp)^2)
+
+smooth.mse <- mean((smooth.pred$y-Boston_test$Resp)^2)
+names(smooth.mse) = "Smoothing Splines MSE"
+```
+
+```{r}
+medv.grid <- seq(min(Boston$medv),max(Boston$medv),length=100)
+pred.cs <- predict(Boston.cubic, newdata=data.frame(medv=medv.grid), se=T)
+pred.ns <- predict(Boston.natural, newdata=data.frame(medv=medv.grid), se=T)
+plot(Boston$medv,Boston$Resp,pch=20,xlab="Median Home Value",ylab="Response", col="grey")
+lines(Boston.smoothcv,col="red",lwd=3)
+lines(medv.grid, pred.cs$fit,col="blue",lwd=3)
+lines(medv.grid, pred.ns$fit,col="green",lwd=3)
+legend(4, 6, c("Cubic","Natural", "Smoothing"), lwd=c(1.5,1.5, 1.5), col=c("blue","green", "red"), cex=0.7)
+```
+
+There does not seem to be evidence to suggest that the splines with the predictor medv improve our model over bagging, as all three models have much higher test MSEs.    
