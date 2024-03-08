@@ -1,6 +1,9 @@
 # Boston-Housing-Analysis
 The Boston dataset contains the housing values of 506 suburbs in the Boston area. The dataset contains 13 predictors and 1 mystery response variable that we will try to predict statistical analysis.
 
+### Introduction
+Housing is a significant economic indicator that can have a substantial impact on a country's GDP (Gross Domestic Product). The housing sector has a significant multiplier effect on the economy. When there's increased activity in housing, it generates demand for other sectors like manufacturing, retail, and professional services, further boosting GDP. The housing market is often seen as a barometer of economic health. A thriving housing market generally reflects a healthy economy, while a slowdown can indicate broader economic challenges.
+
 ### Team members
 
 Rithika Annareddy,
